@@ -1,0 +1,693 @@
+;(function() {
+
+	BX.namespace("BX.Intranet.Helper.Notification");
+	if (!BX.Intranet.Helper.Notification.Kernel)
+	{
+		return;
+	}
+
+	BX.namespace('BX.External');
+
+	let lastLoadedKernelNotification;
+
+	BX.External.NotificationManager = {
+		initErrors: [],
+		errors: [],
+		notificationList: {},
+		isSavingNotifications: false,
+		queueToSave: [],
+		getNotificationUrl: '',
+		checkNotificationsUrl: '',
+
+		getLastLoadedNotificationKernel: function() {
+			return lastLoadedKernelNotification;
+		},
+
+		getLoadKernelEvent: function() {
+			return 'kernelIsLoad';
+		},
+
+		resetQueueToSave: function() {
+			this.queueToSave = [];
+		},
+
+		init: function(params) {
+			this.params = params || {};
+
+			this.initHelperData();
+
+			if (this.needActualizeNotifications())
+			{
+				this.actualizeNotifications();
+			}
+			else
+			{
+				this.checkShowNotifications();
+			}
+		},
+
+		initParams: function() {
+			if(this.helpdeskDomain.length > 0)
+			{
+				this.getNotificationUrl = this.helpdeskDomain + '/widget2/get_notification.php';
+				this.checkNotificationsUrl = this.helpdeskDomain + '/widget2/check_notifications.php';
+			}
+			else
+			{
+				this.addInitError(new Error('HELPDESK_DOMAIN_NOT_DEFINED'));
+			}
+		},
+
+		initHelperData: function() {
+			this.ajaxUrl = '';
+			this.notifyData = {};
+			this.currentNotificationsString = '';
+			this.helpdeskDomain = '';
+			var loader = BX.Intranet.Helper.Notification.Kernel.getLoader();
+			if (loader && loader instanceof BX.Intranet.Helper.Notification.Loader)
+			{
+				this.ajaxUrl = loader.getAjaxUrl() || '';
+				this.notifyData = loader.getNotifyData() || {};
+				this.helpdeskDomain = loader.getHelpUrl() || '';
+				this.timeNow = loader.getTimeNow() || '';
+				this.lastCheckNotificationsTime = loader.getLastCheckNotificationsTime() || '';
+				this.currentNotificationsString = loader.getCurrentNotificationsString() || '';
+				loader.setDelay(3600);
+			}
+
+			this.initParams();
+			this.initNotificationsList();
+		},
+
+		needActualizeNotifications: function() {
+			var isNeedCheck = false;
+			var dateTimeNow = new Date();
+			dateTimeNow.setTime(this.timeNow * 1000);
+			var dateCheck = new Date();
+			dateCheck.setTime(this.lastCheckNotificationsTime * 1000);
+			if ((dateTimeNow.getTime() - dateCheck.getTime()) / 1000 > this.getCheckNotificationsDelay())
+			{
+				isNeedCheck = true;
+			}
+
+			return isNeedCheck;
+		},
+
+		actualizeNotifications: function() {
+			if (!this.hasInitErrors())
+			{
+				this.checkNotifications();
+			}
+		},
+
+		checkShowNotifications: function() {
+			if (!this.hasInitErrors())
+			{
+				//select notification to show by condition
+				var satisfiedNotificationsId = [];
+
+				for (var notificationId in this.notificationList)
+				{
+					if (this.notificationList.hasOwnProperty(notificationId))
+					{
+						if (this.isConditionsSatisfied(this.notificationList[notificationId]))
+						{
+							satisfiedNotificationsId.push(notificationId);
+						}
+					}
+				}
+
+				var getNotificationId = -1;
+
+				if (satisfiedNotificationsId.length > 1)
+				{
+					getNotificationId = this.getOneNotificationIdFromSatisfied(satisfiedNotificationsId);
+				}
+				else if (satisfiedNotificationsId.length === 1)
+				{
+					getNotificationId = satisfiedNotificationsId[0];
+				}
+
+				if (getNotificationId !== -1 && this.notificationList.hasOwnProperty(getNotificationId.toString()))
+				{
+					var notification = this.notificationList[getNotificationId];
+					if (isNaN(notification.SHOW_COUNTER))
+					{
+						notification.SHOW_COUNTER = 1;
+					}
+					else
+					{
+						notification.SHOW_COUNTER++;
+					}
+
+					this.saveNotifications();
+					this.getNotification(this.notificationList[getNotificationId]);
+				}
+			}
+		},
+
+		getOneNotificationIdFromSatisfied: function(satisfiedIds) {
+			var selectedNotificationId = 0;
+			satisfiedIds = satisfiedIds || [];
+
+			if (BX.type.isArray(satisfiedIds) && satisfiedIds.length > 0)
+			{
+				var minSort = -1;
+				var notificationBySort = {
+					'withoutSort': []
+				};
+				for (var i = 0; i < satisfiedIds.length; i++)
+				{
+					var notification = this.notificationList[satisfiedIds[i]];
+					var sort = parseInt(notification.SORT);
+					if (notification.hasOwnProperty('SORT') && !isNaN(sort))
+					{
+						if (minSort > 0)
+						{
+							minSort = Math.min(minSort, notification.SORT);
+						}
+						else
+						{
+							minSort = sort;
+						}
+
+						if (!notificationBySort.hasOwnProperty(sort.toString()))
+						{
+							notificationBySort[sort.toString()] = [];
+						}
+						notificationBySort[sort.toString()].push(satisfiedIds[i]);
+					}
+					else
+					{
+						notificationBySort.withoutSort.push(satisfiedIds[i]);
+					}
+				}
+
+				if (minSort !== -1)
+				{
+					if (notificationBySort.hasOwnProperty(minSort.toString()))
+					{
+						selectedNotificationId = this.getRandomIdFromSatisfied(notificationBySort[minSort.toString()]);
+					}
+				}
+				else
+				{
+					selectedNotificationId = this.getRandomIdFromSatisfied(notificationBySort.withoutSort);
+				}
+			}
+
+			return selectedNotificationId;
+		},
+
+		getRandomIdFromSatisfied: function(satisfiedId) {
+			return satisfiedId[Math.floor(Math.random() * satisfiedId.length)];
+		},
+
+		prepareListToSave: function() {
+			var result = {};
+
+			if (!this.hasInitErrors())
+			{
+				result = this.notificationList;
+			}
+
+			return JSON.stringify(result);
+		},
+
+		initNotificationsList: function() {
+			if (!this.hasInitErrors())
+			{
+				var currentNotifications = {};
+				try
+				{
+					currentNotifications = JSON.parse(this.currentNotificationsString);
+				}
+				catch (exception)
+				{
+					currentNotifications = {};
+					this.addError({
+						code: 'JSON_PARSE_ERROR_NOTIFICATIONS_STRING',
+						data: { value: this.currentNotificationsString }
+					});
+				}
+				this.notificationList = this.prepareNotifications(currentNotifications);
+			}
+		},
+
+		prepareNotifications: function(notifications) {
+			var checkedNotifications = {};
+			notifications = notifications || {};
+			for (var notificationId in notifications)
+			{
+				if (notifications.hasOwnProperty(notificationId))
+				{
+					var notification = notifications[notificationId];
+
+					if (this.isNotificationCorrect(notification))
+					{
+						checkedNotifications[notificationId] = notification;
+					}
+				}
+			}
+
+			return checkedNotifications;
+		},
+
+		setLastResources: function(resourses) {
+			this.lastResources = resourses;
+		},
+
+		getLastResources: function() {
+			return this.lastResources;
+		},
+
+		getHelpdeskDomain: function() {
+			return this.helpdeskDomain;
+		},
+
+		getNotifyData: function() {
+			return this.notifyData;
+		},
+
+		isNotificationCorrect: function(notification) {
+			var isCorrect = true;
+			notification = notification || {};
+
+			return isCorrect;
+		},
+
+		saveNotifications: function(isSaveTime) {
+			isSaveTime = isSaveTime === true;
+			if (!this.hasInitErrors())
+			{
+				let params = {isSaveTime: isSaveTime};
+				if(!this.isSavingNotifications)
+				{
+					this.sendAjaxToSave(params);
+				}
+				else
+				{
+					this.queueToSave.push(params);
+				}
+			}
+		},
+
+		resetNotificationsOnPortal: function() {
+			this.notificationList = {};
+			this.sendAjaxToSave();
+		},
+
+		sendAjaxToSave: function(params) {
+			this.isSavingNotifications = true;
+			params = params || {};
+			var saveData = {
+				sessid: BX.bitrix_sessid(),
+				action: "saveNotifications",
+				notifications: this.prepareListToSave()
+			};
+			if (params.isSaveTime)
+			{
+				saveData.lastCheckNotificationsTime = 'Y';
+			}
+			if(BX.type.isNotEmptyString(this.ajaxUrl))
+			{
+				BX.ajax({
+					method: "POST",
+					dataType: 'json',
+					url: this.ajaxUrl,
+					data: saveData,
+					onsuccess: BX.proxy(this.saveByAjaxSuccessHandler, this),
+					onfailure: BX.proxy(this.saveByAjaxFailureHandler, this)
+				});
+			}
+		},
+
+		saveByAjaxFailureHandler: function() {
+			this.isSavingNotifications = false;
+		},
+
+		saveByAjaxSuccessHandler: function(result) {
+			this.isSavingNotifications = false;
+			if (this.queueToSave.length > 0)
+			{
+				let params = this.queueToSave.shift();
+				this.sendAjaxToSave(params);
+			}
+		},
+
+		onFailureCheckNotificationsHandler: function(result) {
+
+		},
+
+		onSuccessCheckNotificationsHandler: function(result) {
+			if (result.hasOwnProperty('notifications'))
+			{
+				this.updateNotificationList(this.prepareNotifications(result.notifications));
+				this.checkShowNotifications();
+			}
+		},
+
+		onFailureGetNotificationHandler: function(result) {
+
+		},
+
+		updateNotificationList: function(newNotificationList) {
+			let hasChanges = false;
+			let resultNotificationList = null;
+			for (let newNotificationId in newNotificationList)
+			{
+				if(newNotificationList.hasOwnProperty(newNotificationId))
+				{
+					let newNotification = newNotificationList[newNotificationId];
+					let needAddNewNotification = false;
+					let notificationToSave = newNotification;
+					if(this.notificationList.hasOwnProperty(newNotificationId))
+					{
+						let oldNotification = this.notificationList[newNotificationId];
+						if(!isNaN(oldNotification.SHOW_COUNTER) && oldNotification.SHOW_COUNTER > 0)
+						{
+							notificationToSave = oldNotification;
+						}
+						else
+						{
+							hasChanges = true;
+						}
+					}
+					else
+					{
+						hasChanges = true;
+					}
+					if(resultNotificationList === null)
+					{
+						resultNotificationList = {};
+					}
+					resultNotificationList[newNotificationId] = notificationToSave;
+				}
+			}
+
+			if(resultNotificationList === null)
+			{
+				hasChanges = true;
+				resultNotificationList = {};
+			}
+
+			if(hasChanges)
+			{
+				this.notificationList = resultNotificationList;
+				this.saveNotifications(true);
+			}
+		},
+
+		onSuccessGetNotificationHandler: function(result) {
+			if (result.hasOwnProperty('data'))
+			{
+				var data = result.data;
+				if (data.hasOwnProperty('assets'))
+				{
+					if (data.assets.hasOwnProperty('css') && BX.type.isArray(data.assets.css))
+					{
+						this.includeCss(data.assets.css);
+					}
+					if (data.assets.hasOwnProperty('js') && BX.type.isArray(data.assets.js))
+					{
+						this.includeJs(data.assets.js);
+					}
+				}
+
+				if (data.hasOwnProperty('resources'))
+				{
+					this.setLastResources(data.resources);
+				}
+
+				BX.addCustomEvent(BX.External, this.getLoadKernelEvent(), BX.delegate(function(kernelFunctionName) {
+					lastLoadedKernelNotification = new BX.External[kernelFunctionName]();
+				}, this));
+			}
+		},
+
+		includeCss: function(cssSrc) {
+			cssSrc = cssSrc || [];
+			BX.loadCSS(cssSrc);
+		},
+
+		includeJs: function(jsSrc) {
+			jsSrc = jsSrc || [];
+			BX.loadScript(jsSrc);
+		},
+
+		checkNotifications: function() {
+			if (!this.hasInitErrors())
+			{
+				var checkData = {};
+				this.addNotifyDataParams(checkData);
+
+				checkData.action = 'checkNotifications';
+
+				if(BX.type.isNotEmptyString(this.checkNotificationsUrl))
+				{
+					BX.ajax({
+						method: "POST",
+						dataType: 'json',
+						url: this.checkNotificationsUrl,
+						data: checkData,
+						timeout: 10,
+						onsuccess: BX.proxy(this.onSuccessCheckNotificationsHandler, this),
+						onfailure: BX.proxy(this.onFailureCheckNotificationsHandler, this)
+					});
+				}
+			}
+		},
+
+		getNotification: function(notification) {
+			if (!this.hasInitErrors())
+			{
+				var getData = {};
+				this.addNotifyDataParams(getData);
+
+				getData.action = 'getNotification';
+				getData.auth = notification.AUTH;
+				getData.id = notification.ID;
+				if(notification.isTest === true)
+				{
+					getData.isTest = 'Y';
+				}
+
+				if(BX.type.isNotEmptyString(this.getNotificationUrl))
+				{
+					BX.ajax({
+						method: "post",
+						dataType: 'json',
+						url: this.getNotificationUrl,
+						data: getData,
+						timeout: 10,
+						onsuccess: BX.proxy(this.onSuccessGetNotificationHandler, this),
+						onfailure: BX.proxy(this.onFailureGetNotificationHandler, this)
+					});
+				}
+			}
+		},
+
+		getNotificationById: function(id) {
+			this.getNotification({ID: id, isTest: true});
+		},
+
+		isConditionsSatisfied: function(notification) {
+
+			var isSatisfied = false;
+			var isDeniedToShow = false;
+
+			if (!this.hasInitErrors())
+			{
+				if (notification.hasOwnProperty('CONDITIONS'))
+				{
+					var conditions = notification.CONDITIONS;
+
+					if (conditions.hasOwnProperty('PAGE_TEMPLATE'))
+					{
+						if (!isSatisfied)
+						{
+							isSatisfied = this.isPageTemplateSatisfied(conditions.PAGE_TEMPLATE);
+						}
+					}
+					else
+					{
+						isSatisfied = true;
+					}
+
+					if (conditions.hasOwnProperty('DATE_FROM') && isSatisfied)
+					{
+						isSatisfied = this.isDateFromShowSatisfied(conditions.DATE_FROM);
+					}
+
+					if (conditions.hasOwnProperty('DATE_TO') && isSatisfied)
+					{
+						isSatisfied = this.isDateToShowSatisfied(conditions.DATE_TO);
+					}
+				}
+
+				var maxShowCounter = 1;
+				if (notification.hasOwnProperty('MAX_SHOW_COUNTER') && !isNaN(notification.MAX_SHOW_COUNTER))
+				{
+					maxShowCounter = parseInt(notification.MAX_SHOW_COUNTER);
+				}
+
+				if (notification.hasOwnProperty('SHOW_COUNTER') && !isNaN(notification.SHOW_COUNTER))
+				{
+					var currentCounter = parseInt(notification.SHOW_COUNTER);
+					if (currentCounter >= maxShowCounter)
+					{
+						isDeniedToShow = true;
+					}
+				}
+			}
+
+			if (isDeniedToShow)
+			{
+				isSatisfied = false;
+			}
+
+			return isSatisfied;
+		},
+
+		addNotifyDataParams: function(data) {
+			data = data || {};
+			for (var notifyKey in this.notifyData)
+			{
+				if (this.notifyData.hasOwnProperty(notifyKey))
+				{
+					data[notifyKey] = this.notifyData[notifyKey];
+				}
+			}
+		},
+
+		isPageTemplateSatisfied: function(pageTemplates) {
+			pageTemplates = pageTemplates || [];
+
+			var isSatisfied = false;
+
+			if (pageTemplates.length === 0)
+			{
+				isSatisfied = true;
+			}
+			else
+			{
+				var currentLocationString = location.pathname + location.search;
+
+				if (currentLocationString.length > 0)
+				{
+					for (var i = 0; i < pageTemplates.length; i++)
+					{
+						var pageTemplateRegExp = this.getRegExpFromTemplate(pageTemplates[i]);
+
+						if (pageTemplateRegExp.test(currentLocationString))
+						{
+							isSatisfied = true;
+							break;
+						}
+					}
+				}
+			}
+
+			return isSatisfied;
+		},
+
+		isDateFromShowSatisfied: function(dateTimeFromShow) {
+			dateTimeFromShow = dateTimeFromShow || '';
+			let isSatisfied = false;
+			if(BX.type.isNotEmptyString(dateTimeFromShow))
+			{
+				let dateTimeNow = new Date();
+				let dateTimeFrom = new Date(dateTimeFromShow);
+				dateTimeNow.setTime(this.timeNow * 1000);
+				if(dateTimeNow.getTime() >= dateTimeFrom.getTime())
+				{
+					isSatisfied = true;
+				}
+			}
+
+			return isSatisfied;
+		},
+
+		isDateToShowSatisfied: function(dateTimeToShow) {
+			dateTimeToShow = dateTimeToShow || '';
+			let isSatisfied = false;
+			if(BX.type.isNotEmptyString(dateTimeToShow))
+			{
+				let dateTimeNow = new Date();
+				let dateTimeTo = new Date(dateTimeToShow);
+				dateTimeNow.setTime(this.timeNow * 1000);
+				if(dateTimeNow.getTime() < dateTimeTo.getTime())
+				{
+					isSatisfied = true;
+				}
+			}
+
+			return isSatisfied;
+		},
+
+		getReplaceMap: function() {
+			return {
+				'#ANY_SYMBOLS#': '(.*)'
+			};
+		},
+
+		getRegExpFromTemplate: function(pageTemplate) {
+			var pageTemplateFormatted = pageTemplate;
+			var i = 0;
+
+			while (pageTemplateFormatted.indexOf('*') !== -1 && i < 50)
+			{
+				pageTemplateFormatted = pageTemplateFormatted.replace('*', '#ANY_SYMBOLS#');
+				i++;
+			}
+
+			pageTemplateFormatted = BX.util.escapeRegExp(pageTemplateFormatted);
+
+			for (var search in this.getReplaceMap())
+			{
+				if (this.getReplaceMap().hasOwnProperty(search))
+				{
+					pageTemplateFormatted = pageTemplateFormatted.replace(new RegExp(search, 'g'), this.getReplaceMap()[search]);
+				}
+			}
+
+			return new RegExp(pageTemplateFormatted);
+		},
+
+		hasInitErrors: function() {
+			return this.initErrors.length > 0;
+		},
+
+		addInitError: function(error) {
+			this.initErrors.push(error);
+		},
+
+		addError: function(error) {
+			this.errors.push(error);
+		},
+
+		getCheckNotificationsDelay: function() {
+			return 43200;
+		},
+
+		getAllErrors: function() {
+			return {
+				init: this.initErrors,
+				common: this.errors
+			};
+		},
+
+		isDeniedToHideBlock: function() {
+			return this.isDeniedBlockToHide === true;
+		},
+
+		setDeniedToHideBlock: function(sourceObject, isDeniedBlockToHide) {
+			if(sourceObject instanceof BX.External.NotificationAnniversaryConfetti)
+			{
+				this.isDeniedBlockToHide = isDeniedBlockToHide === true;
+			}
+		}
+	};
+
+	BX.External.NotificationManager.init();
+})();
